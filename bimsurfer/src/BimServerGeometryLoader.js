@@ -1,10 +1,9 @@
 define(["./DataInputStreamReader"], function (DataInputStreamReader) {
 
-    function BimServerGeometryLoader(bimServerApi, models, viewer) {
+    function BimServerGeometryLoader(bimServerApi, viewer, model, roid, globalTransformationMatrix) {
 
         var o = this;
 
-        o.models = models;
         o.bimServerApi = bimServerApi;
         o.viewer = viewer;
         o.state = {};
@@ -15,7 +14,10 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
 		o.geometryIds = {};
 		o.dataToInfo = {};
 		
-		o.roid = Object.keys(models)[0];
+		o.model = model;
+		o.roid = roid;
+		
+		console.log(globalTransformationMatrix);
 
         this.addProgressListener = function (progressListener) {
             o.progressListeners.push(progressListener);
@@ -45,16 +47,8 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
             }
         };
 
-        this.setLoadRevision = function (roid) {
-            o.options = {type: "revision", roid: roid};
-        };
-
-        this.setLoadTypes = function (roid, schema, types) {
-            o.options = {type: "types", schema: schema, roid: roid, types: types};
-        };
-
-        this.setLoadOids = function (roids, oids) {
-            o.options = {type: "oids", roids: roids, oids: oids};
+        this.setLoadOids = function (oids) {
+            o.options = {type: "oids", oids: oids};
         };
 
         /**
@@ -67,11 +61,11 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
 
             if (BIMSERVER_VERSION == "1.4") {
 
-                o.groupId = o.options.roids[0];
+                o.groupId = o.roid;
                 o.oids = o.options.oids;
                 o.bimServerApi.getMessagingSerializerByPluginClassName("org.bimserver.serializers.binarygeometry.BinaryGeometryMessagingSerializerPlugin", function (serializer) {
                     o.bimServerApi.call("Bimsie1ServiceInterface", "downloadByOids", {
-                        roids: o.options.roids,
+                        roids: [o.roid],
                         oids: o.options.oids,
                         serializerOid: serializer.oid,
                         sync: false,
@@ -85,12 +79,12 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
             } else {
             	var obj = [];
 
-                o.groupId = o.options.roids[0];
+                o.groupId = o.roid;
                 o.infoToOid = o.options.oids;
 
             	for (var k in o.infoToOid) {
             		var oid = parseInt(o.infoToOid[k]);
-            		models[o.options.roids[0]].get(oid, function(object){
+            		o.model.apiModel.get(oid, function(object){
             			if (object.object._rgeometry != null) {
 							if (object.model.objects[object.object._rgeometry] != null) {
 								// Only if this data is preloaded, otherwise just don't include any gi
@@ -117,7 +111,7 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
 
                 var oids = [];
                 obj.forEach(function(wrapper){
-               		oids.push(wrapper.object.object._rgeometry);
+               		oids.push(wrapper.object.object._rgeometry._i);
                 });
 
                 var query = {
@@ -128,9 +122,9 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
                         field: "data"
                     }
                 };
-                o.bimServerApi.getSerializerByPluginClassName("org.bimserver.serializers.binarygeometry.BinaryGeometryMessagingStreamingSerializerPlugin3", function (serializer) {
+                o.bimServerApi.getSerializerByPluginClassName("org.bimserver.serializers.binarygeometry.BinaryGeometryMessagingStreamingSerializerPlugin").then((serializer) => {
                     o.bimServerApi.call("ServiceInterface", "download", {
-                        roids: o.options.roids,
+                        roids: [o.roid],
                         query: JSON.stringify(query),
                         serializerOid : serializer.oid,
                         sync : false
@@ -140,7 +134,6 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
                     });
                 });
             }
-
         };
 
         this._progressHandler = function (topicId, state) {
@@ -200,7 +193,8 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
                 return false;
             }
 
-            var version = data.readByte();
+            o.protocolVersion = data.readByte();
+            console.log(o.protocolVersion);
 
             if (BIMSERVER_VERSION == "1.4") {
 	            if (version != 4 && version != 5 && version != 6) {
@@ -208,11 +202,12 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
 	                return false;
 	            }
             } else {
-	            if (version != 10) {
+	            if (o.protocolVersion != 15) {
 	                console.error("Unimplemented version");
 	                return false;
 	            }
             }
+    		this.multiplierToMm = data.readFloat();
             data.align8();
 
             if (BIMSERVER_VERSION == "1.4") {
@@ -305,7 +300,7 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
 
         this._readObject = function (stream, geometryType) {
         	if (BIMSERVER_VERSION != "1.4") {
-        		stream.align8();
+//        		stream.align8();
         	}
 
 //            var type = stream.readUTF8();
@@ -329,14 +324,26 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
             var i;
 
             if (geometryType == 1) {
-                geometryId = stream.readLong();
+    			var reused = stream.readInt();
+    			var type = stream.readUTF8();
+    			stream.align8();
+
+    			var roid = stream.readLong();
+           		var hasTransparency = stream.readLong() == 1;
+           		geometryId = stream.readLong();
                 numIndices = stream.readInt();
                 if (BIMSERVER_VERSION == "1.4") {
                 	indices = stream.readIntArray(numIndices);
                 } else {
                 	indices = stream.readShortArray(numIndices);
-                	stream.align4();
                 }
+                if (o.protocolVersion >= 11) {
+                	var b = stream.readInt();
+    				if (b == 1) {
+    					var color = {r: stream.readFloat(), g: stream.readFloat(), b: stream.readFloat(), a: stream.readFloat()};
+    				}
+                }
+                stream.align4();
                 numPositions = stream.readInt();
                 positions = stream.readFloatArray(numPositions);
                 numNormals = stream.readInt();
@@ -344,6 +351,15 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
                 numColors = stream.readInt();
                 if (numColors > 0) {
                 	colors = stream.readFloatArray(numColors);
+                } else if (color != null) {
+					// Creating vertex colors here anyways (not transmitted over the line is a plus), should find a way to do this with scenejs without vertex-colors
+					colors = new Array(numPositions * 4);
+					for (var i=0; i<numPositions; i++) {
+						colors[i * 4 + 0] = color.r;
+						colors[i * 4 + 1] = color.g;
+						colors[i * 4 + 2] = color.b;
+						colors[i * 4 + 3] = color.a;
+					}
                 }
 
 				o.geometryIds[geometryId] = [geometryId];
@@ -359,22 +375,33 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
             } else if (geometryType == 2) {
             	console.log("Unimplemented", 2);
             } else if (geometryType == 3) {
+            	if (o.protocolVersion == 12) {
+            		var hasTransparency = stream.readLong() == 1;
+            	}
      			var geometryDataOid = stream.readLong();
                 numParts = stream.readInt();
 				o.geometryIds[geometryDataOid] = [];
 				
 				var geometryIds = [];
                 for (i = 0; i < numParts; i++) {
-                    geometryId = stream.readLong() + 1;
+                	var partId = stream.readLong();
+                    geometryId = geometryDataOid + "_" + i;
                     numIndices = stream.readInt();
 
                     if (BIMSERVER_VERSION == "1.4") {
                     	indices = stream.readIntArray(numIndices);
                     } else {
-                    	indices = stream.readShortArray(numIndices);
-                    	stream.align4();
+                    	indices = stream.readIntArray(numIndices);
                     }
 
+                    if (o.protocolVersion >= 11) {
+                    	var b = stream.readInt();
+        				if (b == 1) {
+        					var color = {r: stream.readFloat(), g: stream.readFloat(), b: stream.readFloat(), a: stream.readFloat()};
+        				}
+                    }
+                	stream.align4();
+                    
                     numPositions = stream.readInt();
                     positions = stream.readFloatArray(numPositions);
                     numNormals = stream.readInt();
@@ -382,6 +409,15 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
                     numColors = stream.readInt();
                     if (numColors > 0) {
                     	colors = stream.readFloatArray(numColors);
+                    } else if (color != null) {
+    					// Creating vertex colors here anyways (not transmitted over the line is a plus), should find a way to do this with scenejs without vertex-colors
+    					colors = new Array(numPositions * 4);
+    					for (var i=0; i<numPositions; i++) {
+    						colors[i * 4 + 0] = color.r;
+    						colors[i * 4 + 1] = color.g;
+    						colors[i * 4 + 2] = color.b;
+    						colors[i * 4 + 3] = color.a;
+    					}
                     }
 
                     geometryIds.push(geometryId);
@@ -400,10 +436,17 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
             } else if (geometryType == 4) {
             	console.log("Unimplemented", 4);
             } else if (geometryType == 5) {
-            	var roid = stream.readLong();
+    			var oid = stream.readLong();
+    			var type = stream.readUTF8();
+    			stream.align8();
+    			var roid = stream.readLong();
     			var geometryInfoOid = stream.readLong();
+    			var hasTransparency = stream.readLong() == 1;
     			var objectBounds = stream.readDoubleArray(6);
     			var matrix = stream.readDoubleArray(16);
+    			if (globalTransformationMatrix != null) {
+    				xeogl.math.mulMat4(matrix, matrix, globalTransformationMatrix);
+    			}
     			var geometryDataOid = stream.readLong();
 				var geometryDataOids = o.geometryIds[geometryDataOid];
 				var oid = o.infoToOid[geometryInfoOid];
@@ -419,9 +462,9 @@ define(["./DataInputStreamReader"], function (DataInputStreamReader) {
     			if (oid == null) {
     				console.error("Not found", o.infoToOid, geometryInfoOid);
     			} else {
-    				o.models[roid].get(oid, function(object){
+    				o.model.apiModel.get(oid, function(object){
     					object.gid = geometryInfoOid;
-    					var modelId = roid; // TODO: set to the model ID
+    					var modelId = o.roid; // TODO: set to the model ID
     					o._createObject(modelId, roid, oid, oid, geometryDataOids, object.getType(), matrix);
     				});
     			}

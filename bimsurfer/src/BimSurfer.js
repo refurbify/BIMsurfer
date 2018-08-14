@@ -1,18 +1,6 @@
-// Backwards compatibility
-var deps = ["./Notifier", "./BimServerModel", "./PreloadQuery", "./BimServerGeometryLoader", "./xeoViewer/xeoViewer", "./EventHandler"];
-
-/*
-if (typeof(BimServerClient) == 'undefined') {
-    window.BIMSERVER_VERSION = "1.4";
-    deps.push("bimserverapi_BimServerApi");
-} else {
-    window.BIMSERVER_VERSION = "1.5";
-}
-*/
-
 window.BIMSERVER_VERSION = "1.5";
 
-define(deps, function (Notifier, Model, PreloadQuery, GeometryLoader, xeoViewer, EventHandler, _BimServerApi) {
+define(["./Notifier", "./BimServerModel", "./PreloadQuery", "./BimServerGeometryLoader", "./xeoViewer/xeoViewer", "./EventHandler"], function (Notifier, Model, PreloadQuery, GeometryLoader, xeoViewer, EventHandler, _BimServerApi) {
 	
     // Backwards compatibility
     var BimServerApi;
@@ -30,9 +18,7 @@ define(deps, function (Notifier, Model, PreloadQuery, GeometryLoader, xeoViewer,
 
         cfg = cfg || {};
 
-        var viewer = this.viewer = new xeoViewer({
-            domNode: cfg.domNode
-        });
+        var viewer = this.viewer = new xeoViewer(cfg);
 
         /**
          * Fired whenever this BIMSurfer's camera changes.
@@ -118,14 +104,22 @@ define(deps, function (Notifier, Model, PreloadQuery, GeometryLoader, xeoViewer,
 					resolve(params);
 				} else {
 					params.api.call("ServiceInterface", "getAllRelatedProjects", {poid: params.poid}, function(data) {
-						if (data.length > 0) {
-							var projectData = data[0];
-							params.roid = projectData.lastRevisionId;
-							params.schema = projectData.schema;
-							self.models = [projectData];
-							
-							resolve(params);
-						} else {
+                        var resolved = false;
+                        
+                        data.forEach(function(projectData) {
+                            if (projectData.oid == params.poid) {
+                                params.roid = projectData.lastRevisionId;
+                                params.schema = projectData.schema;
+                                if (!self.models) {
+                                    self.models = [];
+                                }
+                                self.models.push(projectData);
+                                resolved = true;
+                                resolve(params);
+                            }
+                        });
+                        
+                        if (!resolved) {
 							reject();
 						}
 					}, reject);
@@ -135,30 +129,25 @@ define(deps, function (Notifier, Model, PreloadQuery, GeometryLoader, xeoViewer,
 
         this._loadFrom_glTF = function (params) {
             if (params.src) {
+                var maxActiveProcessesEncountered = 0;
+                var oldProgress = 0;
                 return new Promise(function (resolve, reject) {
                     var m = viewer.loadglTF(params.src);
-                    m.on("loaded", function() {
-                    
-                        var numComponents = 0, componentsLoaded = 0;
-
-                        m.iterate(function (component) {
-                            if (component.isType("xeogl.Entity")) {
-                                ++ numComponents;
-                                (function(c) {
-                                    var timesUpdated = 0;
-                                    c.worldBoundary.on("updated", function() {
-                                        if (++timesUpdated == 2) {
-                                            ++ componentsLoaded;
-                                            if (componentsLoaded == numComponents) {
-                                                viewer.viewFit({});
-                                                
-                                                resolve(m);
-                                            }
-                                        }
-                                    });
-                                })(component);
+                    m.on("loaded", function() {						
+						viewer.scene.canvas.spinner.on('processes', function(n) {
+							if (n === 0) {
+                                viewer.viewFit({});
+                                resolve(m);
                             }
-                        });
+                            if (n > maxActiveProcessesEncountered) {
+                                maxActiveProcessesEncountered = n;
+                            }
+                            var progress = parseInt((maxActiveProcessesEncountered - n) * 100 / maxActiveProcessesEncountered);
+                            if (oldProgress != progress) {
+                                self.fire("progress", [progress]);
+                            }
+                            oldProgress = progress;
+						});                        
                     });
                 });
             }
@@ -215,7 +204,7 @@ define(deps, function (Notifier, Model, PreloadQuery, GeometryLoader, xeoViewer,
                 
                 self._idMapping.toGuid.push(oidToGuid);
                 self._idMapping.toId.push(guidToOid);
-
+                
                 var models = {};
 
                 // TODO: Ugh. Undecorate some of the newly created classes
@@ -242,7 +231,7 @@ define(deps, function (Notifier, Model, PreloadQuery, GeometryLoader, xeoViewer,
 
                 loader.setLoadOids([model.model.roid], oids);
 
-                viewer.clear(); // For now, until we support multiple models through the API
+                // viewer.clear(); // For now, until we support multiple models through the API
 
                 viewer.on("tick", function () { // TODO: Fire "tick" event from xeoViewer
                     loader.process();
